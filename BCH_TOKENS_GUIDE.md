@@ -38,7 +38,8 @@ Transfer 10: Alice -= 10, Bob += 10
 ```
 UTXO #1: 100 tokens → Alice
 UTXO #2: 50 tokens → Bob
-Transfer 10: 
+Alice transfers 10 to Bob: 
+  - Consume UTXO #1
   - Create UTXO #3: 10 tokens → Bob
   - Create UTXO #4: 90 tokens → Alice
 ```
