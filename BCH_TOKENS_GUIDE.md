@@ -57,15 +57,15 @@ A Bitcoin Cash UTXO (Unspent Transaction Output) has the following structure:
 
 ```
 UTXO
-├── satoshis: int              // Amount of BCH (in satoshis)
-├── txid: bytes32              // Transaction ID this output belongs to
-├── vout: int                  // Output index (0, 1, 2...)
-└── token: Token (optional)    // Token data (may be empty)
-    ├── amount: int            // Fungible token amount (0 for pure NFTs)
-    ├── category: bytes32      // Unique token identifier (genesis txid)
-    └── nft: NFT (optional)    // NFT-specific data
-        ├── capability: bytes1 // 0x00=none, 0x01=mutable, 0x02=minting
-        └── commitment: bytes  // 0-40 bytes of arbitrary data
+├── satoshis                   // Amount of BCH (in satoshis)
+├── txid                       // Transaction ID this output belongs to
+├── vout                       // Output index (0, 1, 2...)
+└── token                      // Token data (may be empty)
+    ├── amount                 // Fungible token amount (can be 0 if only an NFT on UTXO)
+    ├── category               // Unique token identifier. Empty if no tokens on UTXO
+    └── nft (optional)         // NFT fields empty if no NFT is on UTXO
+        ├── capability         // 0x00=none, 0x01=mutable, 0x02=minting
+        └── commitment         // 0-40 bytes of arbitrary data
 ```
 
 ### Example UTXO with Token:
@@ -96,7 +96,7 @@ UTXO
 Every token output contains:
 
 ### Token Category (32 bytes)
-The unique identifier for a token type. Typically the transaction ID of the genesis transaction that created the token.
+The unique identifier for a token type. Comes from the transaction ID of the genesis transactions vout0 that created the token.
 
 ```
 Genesis Transaction TXID: abc123...
@@ -104,7 +104,8 @@ Genesis Transaction TXID: abc123...
 ```
 
 ### Token Amount
-For fungible tokens: the number of tokens (can be very large).
+For fungible tokens: the number of tokens (1 to 9223372036854775807).
+- Fungible tokens for a category can ONLY be created at genesis. No additional tokens can be minted later.
 For pure NFTs: always 0.
 
 ### NFT Data (optional)
@@ -116,30 +117,30 @@ If the output contains an NFT:
 - `0x02` (minting): Can create more tokens of this category
 
 **Commitment** (0-40 bytes):
-Arbitrary data stored with the NFT - serial numbers, hashes, metadata references, etc.
+Arbitrary data stored with the NFT - serial numbers, hashes, metadata references, 20-byte pubkeyhash (identifies an address), etc.
 
 ---
 
 ## NFT Capabilities
 
 ### None (0x00)
-Standard immutable NFT. Once created, its commitment cannot change.
+Standard immutable NFT. Once created it cannot change its commitment without a minting NFT intervening.
 
 **Use cases:** Digital art, collectibles, proof-of-ownership documents.
 
 ### Mutable (0x01)
-NFT that can update its commitment over time.
+NFT that can update its own commitment during a transaction.
 
 **Use cases:** Gaming items that level up, dynamic NFTs, status credentials.
 
-**Important:** Only the commitment can change - the NFT itself must be spent and recreated to "update" it. The new output must also have `mutable` capability.
+**Important:** Only the commitment can change - the NFT itself must be spent and recreated to "update" it. The new output can stay the `mutable` capability or downgrade itself to `none`.
 
 ### Minting (0x02)
-Authority NFT that can create new tokens of the same category.
+A NFT that can create any number of new NFTs of the same category.
 
 **Use cases:** Token issuers, DAO treasuries, game masters spawning items.
 
-**Important:** The minting NFT is not consumed when minting - it must be preserved in an output to maintain the authority.
+**Important:** Minting NFTs have complete control of their category, including creating additional Minting NFTs. They should be scrutinized and locked down wherever possible to ensure your apps are secure. With great power comes great responsibility.
 
 ---
 
@@ -158,15 +159,15 @@ contract TokenReader() {
         // Split to get category ID and capability separately
         bytes32 categoryId = tokenData.split(32)[0];
         bytes1 capability = tokenData.split(32)[1];
-        
+
+        // Verify it's a minting NFT
+        require(capability == 0x02);
+
         // Read fungible amount
         int amount = tx.inputs[0].tokenAmount;
         
         // Read NFT commitment
         bytes commitment = tx.inputs[0].nftCommitment;
-        
-        // Verify it's a minting NFT
-        require(capability == 0x02);
         
         // Verify specific commitment
         require(commitment == 0x00c9);
@@ -185,18 +186,23 @@ contract TokenTransfer() {
     function transfer() {
         // Read token from input
         bytes32 category = tx.inputs[0].tokenCategory.split(32)[0];
+        bytes1 capability = tx.inputs[0].tokenCategory.split(32)[1];
         int amount = tx.inputs[0].tokenAmount;
         bytes commitment = tx.inputs[0].nftCommitment;
-        bytes1 capability = tx.inputs[0].tokenCategory.split(32)[1];
-        
-        // Send to recipient - preserving all token properties
-        require(tx.outputs[0].tokenCategory.split(32)[0] == category);
+        int input1Satoshis = tx.inputs[0].value;
+
+        // Send output0 to recipient - preserving all token properties
+        require(tx.outputs[0].value == input1Satoshis);
+        require(tx.outputs[0].tokenCategory == category);
         require(tx.outputs[0].tokenAmount == amount);
         require(tx.outputs[0].nftCommitment == commitment);
         require(tx.outputs[0].tokenCategory.split(32)[1] == capability);
         
-        // Also verify the satoshi value is preserved
+        // Alternative method, referencing the input fields themselves
         require(tx.outputs[0].value == tx.inputs[0].value);
+        require(tx.outputs[0].tokenCategory == tx.inputs[0].tokenCategory);
+        require(tx.outputs[0].tokenAmount == tx.inputs[0].tokenAmount);
+        require(tx.outputs[0].nftCommitment == tx.inputs[0].nftCommitment);
     }
 }
 ```
@@ -225,7 +231,7 @@ contract NFTTransfer(
     bytes recipientLockingBytecode
 ) {
     function transfer() {
-        // Verify input has NFT
+        // Verify input0 has NFT
         require(tx.inputs[0].tokenCategory != 0x);
         
         // Get NFT data
@@ -255,7 +261,10 @@ contract TokenSplitter() {
         // Get input token data
         bytes32 category = tx.inputs[0].tokenCategory.split(32)[0];
         int totalAmount = tx.inputs[0].tokenAmount;
-        
+
+        // Validate amountToSend is not negative
+        require(amountToSend > 0);
+
         // Verify sufficient balance
         require(totalAmount >= amountToSend);
         int change = totalAmount - amountToSend;
@@ -290,7 +299,9 @@ contract EvolvingNFT(
         // Verify mutable capability
         bytes1 capability = tx.inputs[0].tokenCategory.split(32)[1];
         require(capability == 0x01);
-        
+
+        bytes newCommitment = <come up with up to 40bytes of data however you want>
+
         // Output must keep mutable capability with new commitment
         require(tx.outputs[0].tokenCategory.split(32)[0] == category);
         require(tx.outputs[0].tokenCategory.split(32)[1] == 0x01);
@@ -300,7 +311,7 @@ contract EvolvingNFT(
 }
 ```
 
-### 4. Minting with Authority NFT
+### 4. Minting with NFT
 
 ```cashscript
 pragma cashscript ^0.12.0;
@@ -312,17 +323,16 @@ contract TokenMinter(
         int mintAmount,
         bytes recipientLockingBytecode
     ) {
-        // Verify input has minting capability
-        bytes32 inputCategory = tx.inputs[0].tokenCategory.split(32)[0];
-        bytes1 capability = tx.inputs[0].tokenCategory.split(32)[1];
+        // Verify input0 has expected category and minting capability
+        require(tx.inputs[0].tokenCategory == categoryId + 0x02);
         
-        require(inputCategory == categoryId);
-        require(capability == 0x02);
-        
-        // Must preserve minting NFT
+        // Must preserve minting NFT back to its same address
+        require(tx.outputs[0].lockingBytecode == tx.inputs[0].lockingBytecode);
         require(tx.outputs[0].tokenCategory == tx.inputs[0].tokenCategory);
         require(tx.outputs[0].nftCommitment == tx.inputs[0].nftCommitment);
         require(tx.outputs[0].tokenAmount == 0);
+        // notice it does not enforce satoshis (value), but since it MUST exist it will always need to have at least a dust-amount of sats
+        // however, if the minting NFT had any extra satoshis on it this contract would allow those extra sats to be redirected anywhere
         
         // Newly minted tokens go to recipient
         require(tx.outputs[1].tokenCategory.split(32)[0] == categoryId);
@@ -344,14 +354,14 @@ Outputs must have at least 546 satoshis to be spendable:
 require(tx.outputs[0].value >= 546);
 ```
 
-This applies to token outputs too - they need both the token AND sufficient BCH.
+This applies to token outputs too - they need both the token AND sufficient BCH to exist as a UTXO.
 
 ### Token Burns
 
 If you don't include a token in any output, it gets burned (destroyed):
 
 ```cashscript
-// BAD: Input has token but output[0] doesn't include it
+// BAD: Input has a token intended to persist but an output doesn't include it
 // This burns the token!
 
 // GOOD: Explicitly preserve or handle the token
@@ -360,54 +370,32 @@ require(tx.outputs[0].tokenCategory == tx.inputs[0].tokenCategory);
 
 **Always verify token preservation** unless intentional burning is the goal.
 
+Note that this includes BCH (.value). If you don't control where the satoshis go then whoever builds the transaction can move them where they wish (if the contract is open enough to allow it), otherwise 'unclaimed' satoshis will automatically be given away to the miners as part of the transaction fee.
+
 ### Genesis Transactions
 
 To create a new token category:
 
-1. Spend a UTXO that will become vout 0
-2. The transaction ID of this spend becomes the category ID
-3. vout 0 becomes the "authhead" - the controlling UTXO for BCMR metadata
+1. Spend a UTXO that is currently on vout0
+2. The transaction ID of that UTXO becomes the new category ID of your new token
+3. The vout0 of your genesis transaction becomes the "authhead" - the controlling UTXO for BCMR metadata
 
 ```
 Input: Some BCH UTXO
 │
 └─► Transaction (becomes new category ID)
-    ├─ Output 0: Authhead (vout 0 - controls category)
+    ├─ Output 0: Authhead (vout 0 - controls category BCMR metadata ownership)
     │   └─ Token: {category: <this_tx_id>, amount: 0, nft: {...}}
     └─ Output 1+: Other outputs
 ```
 
 ### Commitment Size
 
-NFT commitments are limited to 40 bytes. For larger data, store a hash in the commitment and the full data elsewhere (IPFS, BCMR, etc.):
+NFT commitments are limited to 40 bytes (upgrades to 128bytes May 2026). For larger data, store a hash in the commitment and the full data elsewhere (IPFS, BCMR, etc.):
 
 ```cashscript
 // Store 32-byte hash (fits in commitment)
 commitment: 0xa1b2c3d4... // SHA256 hash of actual data
-```
-
-### Capability Preservation
-
-When spending an NFT, you must explicitly set the capability in the output:
-
-```cashscript
-// Preserving minting capability
-require(tx.outputs[0].tokenCategory.split(32)[1] == 0x02);
-
-// Downgrading from minting to none (one-way)
-require(tx.outputs[0].tokenCategory.split(32)[1] == 0x00);
-```
-
-### Testing
-
-Always test token contracts on chipnet before mainnet:
-
-```bash
-# Compile for chipnet
-cashc mytoken.cash --network chipnet
-
-# Get chipnet BCH from faucet
-curl https://chipnet.imaginary.cash/faucet
 ```
 
 ### BCMR and Authheads
@@ -416,7 +404,7 @@ The authhead (vout 0 of genesis) controls BCMR metadata:
 
 - To update token metadata, you must spend the authhead
 - The new authhead becomes vout 0 of the spending transaction
-- Best practice: Move authhead to a dedicated address you control
+- Best practice: Move authhead to a dedicated address you control after token genesis transaction
 
 ```
 Genesis TX (category = this txid)
@@ -426,27 +414,16 @@ Genesis TX (category = this txid)
 └─ vout 1: First token minted
 ```
 
-### Common Mistakes
-
-1. **Forgetting to preserve the minting NFT**: When minting, the authority NFT must be output unchanged.
-
-2. **Not checking capability**: Always verify `tokenCategory.split(32)[1]` matches expected capability.
-
-3. **Burning tokens accidentally**: Always verify token outputs match inputs unless burning is intentional.
-
-4. **Wrong commitment format**: Commitments are raw bytes, not strings. Hex encode if needed.
-
-5. **Ignoring dust limit**: Token outputs must have ≥546 satoshis.
-
 ---
 
 ## Resources
-
-- [CashScript Documentation](https://cashscript.org/)
+https://cashtokens.org/docs/spec/chip
+- [CashTokens Specification](https://cashtokens.org/docs/spec/chip)
 - [CashTokens CHIP](https://github.com/bitjson/cashtokens)
+- [CashScript Documentation](https://cashscript.org/)
 - [BCMR Protocol](https://cashtokens.org/bcmr.html)
 - [Chipnet Faucet](https://chipnet.imaginary.cash/faucet)
 
 ---
 
-*This guide is for CashScript 0.12.0.*
+*This guide is for CashScript 0.12.0 and may contain errors - ask if unsure!*
